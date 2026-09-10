@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Radial SEO Keyword Wheel Explorer (v5 — auto-fit)</title>
+<title>Radial SEO Keyword Wheel Explorer (v6 — instruction mode)</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
   :root { color-scheme: dark; }
@@ -34,26 +34,18 @@
   svg { width: 100%; height: 100%; display: block; cursor: grab; }
   svg:active { cursor: grabbing; }
 
-  /* Кольца уровней */
-  .depth-ring {
-    fill: none; stroke: #1f2937; stroke-width: 1;
-    stroke-dasharray: 2 6; opacity: .6;
-  }
-
-  /* Связи */
+  .depth-ring { fill: none; stroke: #1f2937; stroke-width: 1; stroke-dasharray: 2 6; opacity: .6; }
   .link { fill: none; stroke: #1f2937; stroke-width: 1.4px; }
   .link--strong { stroke: #0070f3; stroke-width: 2.2px; opacity: .8; }
 
-  /* Узлы */
   .node circle {
     fill: #0b0f19; stroke: #0070f3; stroke-width: 2px; cursor: pointer;
     transition: r .15s, fill .15s, stroke .15s;
   }
   .node:hover circle { r: 9px; fill: #0070f3; stroke: #fff; }
   .node--root circle { fill: #0070f3; stroke: #fff; }
-  .node--root text { fill: #fff; font-weight: 600; font-size: 14px; }
+  .node--root text { fill: #fff; font-weight: 600; font-size: 13px; }
 
-  /* Текст с halo, чтобы читался поверх линий */
   .node text {
     font-size: 11px; fill: #9ca3af; pointer-events: none;
     paint-order: stroke;
@@ -68,10 +60,11 @@
 <div id="top-bar">
   <select id="modelSelect">
     <option value="simulation">Fast Simulation (no download)</option>
-    <option value="onnx-community/SmolLM2-135M-Instruct-ONNX-MHA">SmolLM2 135M ONNX (EN, ~270MB)</option>
-    <option value="onnx-community/Qwen2.5-0.5B-Instruct">Qwen 2.5 0.5B ONNX (RU/EN, ~950MB)</option>
+    <option value="onnx-community/Qwen2.5-0.5B-Instruct">Qwen 2.5 0.5B (RU/EN, ~950MB) — рекомендую</option>
+    <option value="onnx-community/Qwen2.5-1.5B-Instruct">Qwen 2.5 1.5B (RU/EN, ~2.5GB) — лучшее качество</option>
+    <option value="onnx-community/SmolLM2-135M-Instruct-ONNX-MHA">SmolLM2 135M (EN, ~270MB) — слабая</option>
   </select>
-  <input type="text" id="promptInput" value="how to choose a mattress for">
+  <input type="text" id="promptInput" value="buy the phone">
   <button id="runBtn">Initialize Core</button>
   <button id="resetBtn" class="secondary">Reset</button>
   <button id="fitBtn" class="secondary">Fit</button>
@@ -87,6 +80,7 @@
 import {
   AutoModelForCausalLM,
   AutoTokenizer,
+  Tensor,
   env
 } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0';
 
@@ -94,15 +88,53 @@ env.allowLocalModels = false;
 env.useBrowserCache = true;
 
 /* ============================================================
- *  Параметры геометрии
+ *  Геометрия
  * ============================================================ */
-const LEVEL_STEP = 140;      // радиальное расстояние между уровнями (px)
-const LABEL_PADDING = 150;   // запас радиуса под подписи (px)
-const MAX_LABEL_LEN = 18;    // сколько символов в подписи
+const LEVEL_STEP = 180;
+const LABEL_PADDING = 180;
+const MAX_LABEL_LEN = 22;
+
+/* ============================================================
+ *  Стоп-слова (для фильтра мусора в ответах модели)
+ * ============================================================ */
+const STOPWORDS = new Set([
+  // EN
+  "a","an","the","and","or","but","of","to","in","on","at","for","with","by",
+  "is","are","was","were","be","been","being","this","that","these","those",
+  "it","its","he","she","they","them","we","us","you","your","my","i","me",
+  "as","if","so","do","does","did","done","have","has","had","will","would",
+  "can","could","should","may","might","must","not","no","yes","also","just",
+  "from","into","about","than","then","only","very","more","most","some",
+  // RU
+  "и","в","во","не","что","он","на","я","с","со","как","а","то","все","она",
+  "так","его","но","да","ты","к","у","же","вы","за","бы","по","только","ее",
+  "мне","было","вот","от","меня","еще","нет","о","из","ему","теперь","когда",
+  "даже","ну","вдруг","ли","если","уже","или","ни","быть","был","него","до",
+  "вас","нибудь","опять","уж","вам","ведь","там","потом","себя","ничего",
+  "ей","может","они","тут","где","есть","надо","ней","для","мы","тебя","их",
+  "чем","была","сам","чтоб","без","будто","чего","раз","тоже","себе","под",
+  "будет","ж","тогда","кто","этот","того","потому","этого","какой","совсем",
+  "ним","здесь","этом","один","почти","мой","тем","чтобы","нее","сейчас",
+  "были","куда","зачем","всех","никогда","можно","при","наконец","два","об",
+  "другой","хоть","после","над","больше","тот","через","эти","нас","про",
+  "всего","них","какая","много","разве","три","эту","моя","впрочем","хорошо",
+  "свою","этой","перед","иногда","лучше","чуть","том","нельзя","такой","им",
+  "более","всегда","конечно","всю","между",
+]);
 
 /* ============================================================
  *  Утилиты
  * ============================================================ */
+function truncate(str, n) {
+  return str.length > n ? str.slice(0, n - 1) + '…' : str;
+}
+function isMeaningful(word) {
+  const clean = word.trim().toLowerCase();
+  if (!clean || clean.length < 2) return false;
+  if (STOPWORDS.has(clean)) return false;
+  if (/^[^\p{L}\p{N}]+$/u.test(clean)) return false;
+  return true;
+}
 function hashString(str) {
   let h = 0;
   for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) | 0;
@@ -126,12 +158,9 @@ function seededShuffle(arr, seed) {
   }
   return a;
 }
-function truncate(str, n) {
-  return str.length > n ? str.slice(0, n - 1) + '…' : str;
-}
 
 /* ============================================================
- *  Глобальное состояние
+ *  Состояние
  * ============================================================ */
 let treeData = null;
 let model = null;
@@ -140,7 +169,6 @@ let currentModelId = null;
 
 const svg = d3.select("#wheelSvg");
 const g = svg.append("g");
-
 const zoomBehavior = d3.zoom()
   .scaleExtent([0.08, 4])
   .on("zoom", (event) => g.attr("transform", event.transform));
@@ -166,13 +194,6 @@ const modelSelect = document.getElementById('modelSelect');
 const promptInput = document.getElementById('promptInput');
 const statusEl = document.getElementById('status');
 
-modelSelect.addEventListener('change', (e) => {
-  const v = e.target.value;
-  if (v === 'simulation') promptInput.value = "how to choose a mattress for";
-  else if (v.includes('Qwen')) promptInput.value = "как выбрать ортопедический матрас для";
-  else promptInput.value = "how to choose a mattress for";
-});
-
 document.getElementById('runBtn').addEventListener('click', initializeCore);
 promptInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') initializeCore(); });
 document.getElementById('resetBtn').addEventListener('click', resetAll);
@@ -184,17 +205,108 @@ document.getElementById('exportBtn').addEventListener('click', exportToCSV);
  * ============================================================ */
 async function ensureModelLoaded(modelId) {
   if (model && currentModelId === modelId) return;
-  statusEl.innerText = `Downloading weights for ${modelId} (first run only)...`;
-
+  statusEl.innerText = `Downloading ${modelId} (first run only)...`;
   model = null; tokenizer = null; currentModelId = modelId;
 
   tokenizer = await AutoTokenizer.from_pretrained(modelId);
   try {
-    model = await AutoModelForCausalLM.from_pretrained(modelId, { device: 'webgpu', dtype: 'fp32' });
+    model = await AutoModelForCausalLM.from_pretrained(modelId, { device: 'webgpu', dtype: 'q4' });
   } catch (e) {
     console.warn('WebGPU failed, falling back to WASM:', e);
-    model = await AutoModelForCausalLM.from_pretrained(modelId, { device: 'wasm', dtype: 'fp32' });
+    model = await AutoModelForCausalLM.from_pretrained(modelId, { device: 'wasm', dtype: 'q4' });
   }
+}
+
+/* ============================================================
+ *  Ручная генерация токенов (обход бага pipeline batch_decode)
+ * ============================================================ */
+async function generateTokens(inputIds, maxNewTokens = 100, temperature = 0.85) {
+  const ids = Array.from(inputIds.data).map(Number);
+  const generated = [];
+  const eosId = tokenizer.eos_token_id;
+
+  for (let step = 0; step < maxNewTokens; step++) {
+    const inputTensor = new Tensor(
+      'int64',
+      BigInt64Array.from(ids.map(BigInt)),
+      [1, ids.length]
+    );
+
+    const outputs = await model({ input_ids: inputTensor });
+    const logits = outputs.logits;
+    const vocabSize = logits.dims[2];
+    const offset = (logits.dims[1] - 1) * vocabSize;
+
+    // Собираем логиты последней позиции
+    let maxLogit = -Infinity;
+    for (let i = 0; i < vocabSize; i++) {
+      const v = logits.data[offset + i];
+      if (v > maxLogit) maxLogit = v;
+    }
+
+    // Softmax с температурой
+    let sum = 0;
+    const probs = new Float64Array(vocabSize);
+    for (let i = 0; i < vocabSize; i++) {
+      const e = Math.exp((logits.data[offset + i] - maxLogit) / temperature);
+      probs[i] = e;
+      sum += e;
+    }
+    for (let i = 0; i < vocabSize; i++) probs[i] /= sum;
+
+    // Sampling
+    let nextId;
+    if (step === 0) {
+      // Первый токен — greedy, чтобы не улететь в мусор
+      let best = 0;
+      for (let i = 1; i < vocabSize; i++) if (probs[i] > probs[best]) best = i;
+      nextId = best;
+    } else {
+      let r = Math.random();
+      let acc = 0;
+      nextId = 0;
+      for (let i = 0; i < vocabSize; i++) {
+        acc += probs[i];
+        if (r <= acc) { nextId = i; break; }
+      }
+    }
+
+    if (nextId === eosId) break;
+    ids.push(nextId);
+    generated.push(nextId);
+  }
+
+  return generated;
+}
+
+/* ============================================================
+ *  Chat-шаблон (с fallback для моделей без apply_chat_template)
+ * ============================================================ */
+function buildPrompt(userContent, modelId) {
+  // Пытаемся использовать родной шаблон токенизатора
+  if (tokenizer.apply_chat_template) {
+    try {
+      return tokenizer.apply_chat_template(
+        [
+          { role: 'system', content: 'You are a SEO keyword research assistant. Reply with only the list, one item per line, no numbering, no explanations.' },
+          { role: 'user', content: userContent }
+        ],
+        { tokenize: false, add_generation_prompt: true }
+      );
+    } catch (e) {
+      console.warn('apply_chat_template failed, using manual template:', e);
+    }
+  }
+
+  // Ручные шаблоны
+  if (modelId.includes('Qwen')) {
+    return `<|im_start|>system\nYou are a SEO keyword research assistant. Reply with only the list, one item per line, no numbering.<|im_end|>\n<|im_start|>user\n${userContent}<|im_end|>\n<|im_start|>assistant\n`;
+  }
+  if (modelId.includes('SmolLM')) {
+    return `<|im_start|>system\nYou are a SEO keyword research assistant. Reply with only the list, one item per line, no numbering.<|im_end|>\n<|im_start|>user\n${userContent}<|im_end|>\n<|im_start|>assistant\n`;
+  }
+  // Общий fallback
+  return `User: ${userContent}\nAssistant:`;
 }
 
 /* ============================================================
@@ -212,7 +324,7 @@ async function initializeCore() {
       await ensureModelLoaded(mode);
     } catch (err) {
       console.error('Model load failed:', err);
-      statusEl.innerText = `Model load failed: ${err.message}. Falling back to simulation.`;
+      statusEl.innerText = `Model load failed: ${err.message}. Using simulation.`;
       modelSelect.value = 'simulation';
     }
   }
@@ -230,66 +342,86 @@ function resetAll() {
 }
 
 /* ============================================================
- *  Раскрытие узла
+ *  Раскрытие узла: инструкция «дай похожие запросы»
  * ============================================================ */
 async function expandNodeLayer(node) {
   const mode = modelSelect.value;
-  statusEl.innerText = `Calculating next tokens for: "${node.fullPath}"`;
+  statusEl.innerText = `Generating related queries for: "${node.fullPath}"`;
 
   if (mode === 'simulation') {
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 300));
     const isRussian = /[а-яА-Я]/.test(node.fullPath);
-    const poolEN = ["back pain", "side sleepers", "kids", "heavy people",
-                    "couples", "allergies", "spine health", "budget",
-                    "luxury sleep", "toddlers", "neck support", "firmness"];
-    const poolRU = ["ребенка", "болей в спине", "двуспальной кровати",
-                    "подростка", "пожилых людей", "съемной квартиры",
-                    "новорожденного", "здорового сна", "жесткости", "наполнителя"];
+    const poolEN = ["phone case", "phone repair", "cheap phone", "phone screen protector",
+                    "best budget phone", "unlocked phone", "phone plans", "used phone",
+                    "phone holder", "phone charger", "phone deals", "smartphone"];
+    const poolRU = ["чехол для телефона", "ремонт телефона", "недорогой смартфон",
+                    "защитное стекло", "лучший бюджетный телефон", "телефон без контракта",
+                    "тарифы на связь", "б/у телефон", "держатель для телефона",
+                    "зарядка для телефона", "скидки на телефоны", "смартфон"];
     const pool = isRussian ? poolRU : poolEN;
 
     const seed = hashString(node.fullPath);
-    const picks = seededShuffle(pool, seed).slice(0, 5);
-    const rnd = mulberry32(seed ^ 0x9E3779B9);
+    const picks = seededShuffle(pool, seed).slice(0, 6);
 
-    node.children = picks.map((word, idx) => {
-      const prob = Math.max(3, 45 - idx * 7 - Math.floor(rnd() * 5));
-      return { name: `${word} (${prob}%)`, fullPath: `${node.fullPath} ${word}`, children: null };
-    });
+    node.children = picks.map(q => ({
+      name: q,
+      fullPath: q,
+      children: null
+    }));
   } else {
     try {
-      const inputs = await tokenizer(node.fullPath, { return_tensors: 'pt' });
-      const outputs = await model(inputs);
-      const logits = outputs.logits;
-      const seqLen = logits.dims[1];
-      const vocabSize = logits.dims[2];
+      const userContent = `Generate 8 realistic Google search queries that a person looking for "${node.fullPath}" might also type. Keep each query short (2-6 words). Output ONLY the queries, one per line, no numbering, no bullet points, no explanation.`;
 
-      const lastTokenLogits = new Float32Array(vocabSize);
-      const offset = (seqLen - 1) * vocabSize;
-      for (let i = 0; i < vocabSize; i++) lastTokenLogits[i] = logits.data[offset + i];
+      const prompt = buildPrompt(userContent, mode);
+      const inputs = await tokenizer(prompt, { return_tensors: 'pt' });
 
-      const { indices, values } = getTopK(lastTokenLogits, 5);
-      node.children = [];
+      statusEl.innerText = `Model is generating queries for "${node.fullPath}"...`;
+      const generatedIds = await generateTokens(inputs.input_ids, 120, 0.85);
 
-      for (let i = 0; i < indices.length; i++) {
-        const tokenIndex = indices[i];
-        const probability = Math.round(values[i] * 100);
-        let word = tokenizer.decode([tokenIndex], { skip_special_tokens: true });
-        word = word.replace(/[ĠĊ]/g, ' ').replace(/<\|.*?\|>/g, '').trim();
-        if (!word) continue;
+      let text = tokenizer.decode(generatedIds, { skip_special_tokens: true });
 
-        const nextPath = /[\s]$/.test(node.fullPath) || /^\s/.test(word)
-          ? `${node.fullPath}${word}`
-          : `${node.fullPath} ${word}`;
+      // Парсим строки
+      const lines = text.split(/[\n\r]+/).map(l => l.trim()).filter(Boolean);
+      const queries = [];
+      for (const line of lines) {
+        // Убираем ведущие маркеры списка и нумерацию
+        let cleaned = line.replace(/^[-*•·\d.)\]]+\s*/, '').trim();
+        cleaned = cleaned.replace(/^["'`]+|["'`]+$/g, '').trim();
 
-        node.children.push({
-          name: `${word} (${probability}%)`,
-          fullPath: nextPath.trim(),
-          children: null
-        });
+        if (cleaned.length < 3 || cleaned.length > 70) continue;
+
+        const words = cleaned.split(/\s+/).filter(Boolean);
+        if (words.length < 1 || words.length > 8) continue;
+
+        // Должно быть хотя бы одно содержательное слово
+        const meaningfulCount = words.filter(w => isMeaningful(w)).length;
+        if (meaningfulCount < 1) continue;
+
+        // Не должно быть предложений (точки в конце)
+        if (/[.!?]$/.test(cleaned)) continue;
+
+        queries.push(cleaned);
       }
 
-      if (node.children.length === 0) {
-        node.children = [{ name: '∅ (end)', fullPath: node.fullPath, children: null }];
+      // Дедупликация (регистронезависимая)
+      const seen = new Set();
+      const unique = queries.filter(q => {
+        const k = q.toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+
+      if (unique.length === 0) {
+        statusEl.innerText = `Model produced no valid queries for "${node.fullPath}". Try a larger model or different prompt.`;
+        node.children = [{ name: '(no results)', fullPath: node.fullPath, children: null }];
+      } else {
+        node.children = unique.slice(0, 6).map(q => ({
+          name: q,
+          fullPath: q,
+          children: null
+        }));
+        statusEl.innerText = `Got ${node.children.length} related queries. Click any to expand further.`;
       }
     } catch (e) {
       console.error("Inference error:", e);
@@ -297,35 +429,10 @@ async function expandNodeLayer(node) {
       return;
     }
   }
-
-  statusEl.innerText = "Wheel expanded. Click an outer node to branch further.";
 }
 
 /* ============================================================
- *  Top-K из логитов (Softmax)
- * ============================================================ */
-function getTopK(logitsData, k) {
-  const data = logitsData;
-  let maxLogit = -Infinity;
-  for (let i = 0; i < data.length; i++) if (data[i] > maxLogit) maxLogit = data[i];
-
-  let sum = 0;
-  const exps = new Float64Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    const e = Math.exp(data[i] - maxLogit);
-    exps[i] = e;
-    sum += e;
-  }
-
-  const idx = Array.from({ length: data.length }, (_, i) => i);
-  idx.sort((a, b) => exps[b] - exps[a]);
-
-  const topIdx = idx.slice(0, k);
-  return { indices: topIdx, values: topIdx.map(i => exps[i] / sum) };
-}
-
-/* ============================================================
- *  Отрисовка радиального дерева (v5)
+ *  Отрисовка радиального дерева
  * ============================================================ */
 function drawRadialTree({ fit = false } = {}) {
   if (!treeData) return;
@@ -334,19 +441,13 @@ function drawRadialTree({ fit = false } = {}) {
 
   const root = d3.hierarchy(treeData, d => d.children);
 
-  // 1) Раскладка углов: d3.tree с якорем на «листьях»
   const radialLayout = d3.tree()
     .size([2 * Math.PI, 1])
-    .separation((a, b) => {
-      // Больше воздуха между «двоюродными» узлами, чем между соседними
-      return a.parent === b.parent ? 1.4 : 2.6;
-    });
+    .separation((a, b) => a.parent === b.parent ? 1.5 : 2.8);
   radialLayout(root);
 
-  // 2) Радиус — фиксированный шаг на уровень, а не нормализация по высоте дерева
   root.each(d => { d.radius = d.depth * LEVEL_STEP; });
 
-  // 3) Рисуем пунктирные кольца уровней — помогают глазу видеть «этажи»
   const maxDepth = root.height;
   for (let i = 1; i <= maxDepth; i++) {
     g.append("circle")
@@ -354,27 +455,18 @@ function drawRadialTree({ fit = false } = {}) {
       .attr("r", i * LEVEL_STEP);
   }
 
-  // Полярные → декартовы
   function toXY(angle, radius) {
     const a = angle - Math.PI / 2;
     return [radius * Math.cos(a), radius * Math.sin(a)];
   }
 
-  // 4) Связи
   g.selectAll(".link")
     .data(root.links())
     .enter()
     .append("path")
-    .attr("class", d => {
-      const m = /\((\d+)%\)/.exec(d.target.data.name || "");
-      const p = m ? parseInt(m[1], 10) : 0;
-      return p >= 30 ? "link link--strong" : "link";
-    })
-    .attr("d", d3.linkRadial()
-      .angle(d => d.x)
-      .radius(d => d.radius));
+    .attr("class", "link")
+    .attr("d", d3.linkRadial().angle(d => d.x).radius(d => d.radius));
 
-  // 5) Узлы
   const node = g.selectAll(".node")
     .data(root.descendants())
     .enter()
@@ -389,13 +481,12 @@ function drawRadialTree({ fit = false } = {}) {
     .attr("r", d => d.depth === 0 ? 13 : 5)
     .on("click", async (event, d) => {
       event.stopPropagation();
-      if (!d.data.children) {
+      if (!d.data.children || d.data.children.length === 0) {
         await expandNodeLayer(d.data);
         drawRadialTree({ fit: true });
       }
     });
 
-  // 6) Подписи — с флипом, чтобы на левой половине не были «вверх ногами»
   node.append("text")
     .attr("dy", "0.32em")
     .attr("x", d => d.x < Math.PI ? 11 : -11)
@@ -403,14 +494,12 @@ function drawRadialTree({ fit = false } = {}) {
     .attr("transform", d => {
       if (d.depth === 0) return "";
       const deg = d.x * 180 / Math.PI - 90;
-      // Левую половину разворачиваем на 180°, чтобы текст читался слева направо
       return d.x > Math.PI ? `rotate(${deg + 180})` : `rotate(${deg})`;
     })
     .text(d => truncate(d.data.name, MAX_LABEL_LEN))
     .append("title")
     .text(d => d.data.name);
 
-  // 7) Auto-fit: плавно подгоняем масштаб, чтобы дерево целиком влезло
   if (fit) {
     const maxR = d3.max(root.descendants(), d => d.radius) || LEVEL_STEP;
     const needed = maxR + LABEL_PADDING;
@@ -430,17 +519,13 @@ function drawRadialTree({ fit = false } = {}) {
  * ============================================================ */
 function exportToCSV() {
   if (!treeData) return;
-  const rows = [["keyword", "probability_pct", "depth", "path"]];
-  function walk(node, depth) {
-    if (depth > 0) {
-      const m = /\((\d+)%\)$/.exec(node.name || "");
-      const prob = m ? m[1] : "";
-      const keyword = (node.name || "").replace(/\s*\(\d+%\)$/, "");
-      rows.push([keyword, prob, depth, node.fullPath || ""]);
-    }
-    if (node.children) node.children.forEach(c => walk(c, depth + 1));
+  const rows = [["keyword", "depth", "parent"]];
+
+  function walk(node, depth, parent) {
+    if (depth > 0) rows.push([node.name, depth, parent || ""]);
+    if (node.children) node.children.forEach(c => walk(c, depth + 1, node.name));
   }
-  walk(treeData, 0);
+  walk(treeData, 0, "");
 
   const csv = rows.map(r =>
     r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")
