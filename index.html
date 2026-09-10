@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Radial SEO Keyword Wheel Explorer (fixed v4)</title>
+<title>Radial SEO Keyword Wheel Explorer (v5 — auto-fit)</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
   :root { color-scheme: dark; }
@@ -22,7 +22,7 @@
     padding: 9px 13px; border-radius: 6px; font-size: 14px; outline: none;
     transition: all .2s;
   }
-  input { width: 280px; border-color: #0070f3; }
+  input { width: 260px; border-color: #0070f3; }
   input:focus { box-shadow: 0 0 0 2px rgba(0,112,243,.35); }
   select, button { cursor: pointer; }
   button { background: #0070f3; border: none; font-weight: 500; }
@@ -33,21 +33,34 @@
   #canvas-container { flex: 1; position: relative; }
   svg { width: 100%; height: 100%; display: block; cursor: grab; }
   svg:active { cursor: grabbing; }
+
+  /* Кольца уровней */
+  .depth-ring {
+    fill: none; stroke: #1f2937; stroke-width: 1;
+    stroke-dasharray: 2 6; opacity: .6;
+  }
+
+  /* Связи */
+  .link { fill: none; stroke: #1f2937; stroke-width: 1.4px; }
+  .link--strong { stroke: #0070f3; stroke-width: 2.2px; opacity: .8; }
+
+  /* Узлы */
   .node circle {
     fill: #0b0f19; stroke: #0070f3; stroke-width: 2px; cursor: pointer;
     transition: r .15s, fill .15s, stroke .15s;
   }
   .node:hover circle { r: 9px; fill: #0070f3; stroke: #fff; }
-  .node--root circle { fill: #0070f3; stroke: #fff; r: 12px; }
+  .node--root circle { fill: #0070f3; stroke: #fff; }
+  .node--root text { fill: #fff; font-weight: 600; font-size: 14px; }
+
+  /* Текст с halo, чтобы читался поверх линий */
   .node text {
     font-size: 11px; fill: #9ca3af; pointer-events: none;
-    transition: fill .15s; paint-order: stroke;
+    paint-order: stroke;
     stroke: #0b0f19; stroke-width: 3px; stroke-linejoin: round;
+    transition: fill .15s;
   }
   .node:hover text { fill: #fff; }
-  .node--root text { fill: #fff; font-weight: 600; font-size: 13px; }
-  .link { fill: none; stroke: #1f2937; stroke-width: 1.5px; transition: stroke .2s, stroke-width .2s; }
-  .link--strong { stroke: #0070f3; stroke-width: 2.5px; }
 </style>
 </head>
 <body>
@@ -61,6 +74,7 @@
   <input type="text" id="promptInput" value="how to choose a mattress for">
   <button id="runBtn">Initialize Core</button>
   <button id="resetBtn" class="secondary">Reset</button>
+  <button id="fitBtn" class="secondary">Fit</button>
   <button id="exportBtn" class="secondary">Export CSV</button>
   <div id="status">Enter a phrase and click Initialize.</div>
 </div>
@@ -70,22 +84,24 @@
 </div>
 
 <script type="module">
-/* ============================================================
- *  Импорты: работаем с AutoModelForCausalLM напрямую,
- *  чтобы избежать бага pipeline "e.map is not a function"
- * ============================================================ */
 import {
   AutoModelForCausalLM,
   AutoTokenizer,
   env
 } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0';
 
-// Отключаем поиск локальных моделей (иначе браузер тянет localhost/models/*.json → HTML → JSON.parse падает)
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
 /* ============================================================
- *  Утилиты: детерминированный random для воспроизводимой симуляции
+ *  Параметры геометрии
+ * ============================================================ */
+const LEVEL_STEP = 140;      // радиальное расстояние между уровнями (px)
+const LABEL_PADDING = 150;   // запас радиуса под подписи (px)
+const MAX_LABEL_LEN = 18;    // сколько символов в подписи
+
+/* ============================================================
+ *  Утилиты
  * ============================================================ */
 function hashString(str) {
   let h = 0;
@@ -125,9 +141,8 @@ let currentModelId = null;
 const svg = d3.select("#wheelSvg");
 const g = svg.append("g");
 
-// Единственный zoom behavior — переиспользуем везде
 const zoomBehavior = d3.zoom()
-  .scaleExtent([0.15, 4])
+  .scaleExtent([0.08, 4])
   .on("zoom", (event) => g.attr("transform", event.transform));
 svg.call(zoomBehavior);
 
@@ -141,11 +156,11 @@ function updateDimensions() {
 updateDimensions();
 window.addEventListener('resize', () => {
   updateDimensions();
-  if (treeData) drawRadialTree();
+  if (treeData) drawRadialTree({ fit: true });
 });
 
 /* ============================================================
- *  UI-хуки
+ *  UI
  * ============================================================ */
 const modelSelect = document.getElementById('modelSelect');
 const promptInput = document.getElementById('promptInput');
@@ -161,40 +176,29 @@ modelSelect.addEventListener('change', (e) => {
 document.getElementById('runBtn').addEventListener('click', initializeCore);
 promptInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') initializeCore(); });
 document.getElementById('resetBtn').addEventListener('click', resetAll);
+document.getElementById('fitBtn').addEventListener('click', () => { if (treeData) drawRadialTree({ fit: true }); });
 document.getElementById('exportBtn').addEventListener('click', exportToCSV);
 
 /* ============================================================
- *  Загрузка модели через AutoModelForCausalLM
+ *  Загрузка модели
  * ============================================================ */
 async function ensureModelLoaded(modelId) {
   if (model && currentModelId === modelId) return;
-
   statusEl.innerText = `Downloading weights for ${modelId} (first run only)...`;
 
-  // Освобождаем предыдущую модель
-  model = null;
-  tokenizer = null;
-  currentModelId = modelId;
+  model = null; tokenizer = null; currentModelId = modelId;
 
   tokenizer = await AutoTokenizer.from_pretrained(modelId);
-
-  // Пробуем WebGPU, при неудаче — WASM (CPU)
   try {
-    model = await AutoModelForCausalLM.from_pretrained(modelId, {
-      device: 'webgpu',
-      dtype: 'fp32'
-    });
+    model = await AutoModelForCausalLM.from_pretrained(modelId, { device: 'webgpu', dtype: 'fp32' });
   } catch (e) {
     console.warn('WebGPU failed, falling back to WASM:', e);
-    model = await AutoModelForCausalLM.from_pretrained(modelId, {
-      device: 'wasm',
-      dtype: 'fp32'
-    });
+    model = await AutoModelForCausalLM.from_pretrained(modelId, { device: 'wasm', dtype: 'fp32' });
   }
 }
 
 /* ============================================================
- *  Инициализация дерева
+ *  Инициализация / сброс
  * ============================================================ */
 async function initializeCore() {
   const rootPhrase = promptInput.value.trim();
@@ -215,28 +219,25 @@ async function initializeCore() {
 
   treeData = { name: rootPhrase, fullPath: rootPhrase, children: null };
   await expandNodeLayer(treeData);
-  drawRadialTree();
-
-  svg.call(zoomBehavior.transform,
-    d3.zoomIdentity.translate(width / 2, height / 2).scale(0.9));
+  drawRadialTree({ fit: true });
 }
 
 function resetAll() {
   treeData = null;
   g.selectAll("*").remove();
-  svg.call(zoomBehavior.transform, d3.zoomIdentity);
+  svg.interrupt().transition().duration(300).call(zoomBehavior.transform, d3.zoomIdentity);
   statusEl.innerText = "Reset. Enter a phrase and click Initialize.";
 }
 
 /* ============================================================
- *  Раскрытие узла: симуляция ИЛИ реальная модель
+ *  Раскрытие узла
  * ============================================================ */
 async function expandNodeLayer(node) {
   const mode = modelSelect.value;
   statusEl.innerText = `Calculating next tokens for: "${node.fullPath}"`;
 
   if (mode === 'simulation') {
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 200));
     const isRussian = /[а-яА-Я]/.test(node.fullPath);
     const poolEN = ["back pain", "side sleepers", "kids", "heavy people",
                     "couples", "allergies", "spine health", "budget",
@@ -252,33 +253,19 @@ async function expandNodeLayer(node) {
 
     node.children = picks.map((word, idx) => {
       const prob = Math.max(3, 45 - idx * 7 - Math.floor(rnd() * 5));
-      return {
-        name: `${word} (${prob}%)`,
-        fullPath: `${node.fullPath} ${word}`,
-        children: null
-      };
+      return { name: `${word} (${prob}%)`, fullPath: `${node.fullPath} ${word}`, children: null };
     });
   } else {
     try {
-      // 1. Токенизируем входную фразу
       const inputs = await tokenizer(node.fullPath, { return_tensors: 'pt' });
-
-      // 2. Прямой вызов модели — получаем сырые логиты
       const outputs = await model(inputs);
-
-      // 3. Достаём тензор логитов. Формат: [batch, seq_len, vocab]
       const logits = outputs.logits;
-
-      // 4. Нам нужен вектор логитов для ПОСЛЕДНЕГО токена в последовательности
       const seqLen = logits.dims[1];
       const vocabSize = logits.dims[2];
 
-      // Извлекаем последний вектор логитов (позиция seq_len - 1)
       const lastTokenLogits = new Float32Array(vocabSize);
       const offset = (seqLen - 1) * vocabSize;
-      for (let i = 0; i < vocabSize; i++) {
-        lastTokenLogits[i] = logits.data[offset + i];
-      }
+      for (let i = 0; i < vocabSize; i++) lastTokenLogits[i] = logits.data[offset + i];
 
       const { indices, values } = getTopK(lastTokenLogits, 5);
       node.children = [];
@@ -286,8 +273,6 @@ async function expandNodeLayer(node) {
       for (let i = 0; i < indices.length; i++) {
         const tokenIndex = indices[i];
         const probability = Math.round(values[i] * 100);
-
-        // Декодируем ID токена в текст вручную
         let word = tokenizer.decode([tokenIndex], { skip_special_tokens: true });
         word = word.replace(/[ĠĊ]/g, ' ').replace(/<\|.*?\|>/g, '').trim();
         if (!word) continue;
@@ -313,16 +298,14 @@ async function expandNodeLayer(node) {
     }
   }
 
-  statusEl.innerText = "Wheel tier expanded. Click an outer node to branch further.";
+  statusEl.innerText = "Wheel expanded. Click an outer node to branch further.";
 }
 
 /* ============================================================
  *  Top-K из логитов (Softmax)
  * ============================================================ */
 function getTopK(logitsData, k) {
-  // logitsData: Float32Array или обычный массив чисел
   const data = logitsData;
-
   let maxLogit = -Infinity;
   for (let i = 0; i < data.length; i++) if (data[i] > maxLogit) maxLogit = data[i];
 
@@ -338,39 +321,46 @@ function getTopK(logitsData, k) {
   idx.sort((a, b) => exps[b] - exps[a]);
 
   const topIdx = idx.slice(0, k);
-  return {
-    indices: topIdx,
-    values: topIdx.map(i => exps[i] / sum)
-  };
+  return { indices: topIdx, values: topIdx.map(i => exps[i] / sum) };
 }
 
 /* ============================================================
- *  Отрисовка радиального дерева
+ *  Отрисовка радиального дерева (v5)
  * ============================================================ */
-function drawRadialTree() {
+function drawRadialTree({ fit = false } = {}) {
   if (!treeData) return;
 
   g.selectAll("*").remove();
 
   const root = d3.hierarchy(treeData, d => d.children);
-  const radius = Math.min(width, height) / 2 - 160;
 
-  // cluster вместо tree — равномернее распределяет листья по кругу
-  const radialLayout = d3.cluster()
-    .size([2 * Math.PI, Math.max(80, radius)])
+  // 1) Раскладка углов: d3.tree с якорем на «листьях»
+  const radialLayout = d3.tree()
+    .size([2 * Math.PI, 1])
     .separation((a, b) => {
-      const depth = Math.max(1, a.depth);
-      return ((a.parent === b.parent ? 1 : 2.2) / depth);
+      // Больше воздуха между «двоюродными» узлами, чем между соседними
+      return a.parent === b.parent ? 1.4 : 2.6;
     });
-
   radialLayout(root);
 
-  function radialPoint(x, y) {
-    const angle = x - Math.PI / 2;
-    return [y * Math.cos(angle), y * Math.sin(angle)];
+  // 2) Радиус — фиксированный шаг на уровень, а не нормализация по высоте дерева
+  root.each(d => { d.radius = d.depth * LEVEL_STEP; });
+
+  // 3) Рисуем пунктирные кольца уровней — помогают глазу видеть «этажи»
+  const maxDepth = root.height;
+  for (let i = 1; i <= maxDepth; i++) {
+    g.append("circle")
+      .attr("class", "depth-ring")
+      .attr("r", i * LEVEL_STEP);
   }
 
-  // Связи
+  // Полярные → декартовы
+  function toXY(angle, radius) {
+    const a = angle - Math.PI / 2;
+    return [radius * Math.cos(a), radius * Math.sin(a)];
+  }
+
+  // 4) Связи
   g.selectAll(".link")
     .data(root.links())
     .enter()
@@ -380,44 +370,67 @@ function drawRadialTree() {
       const p = m ? parseInt(m[1], 10) : 0;
       return p >= 30 ? "link link--strong" : "link";
     })
-    .attr("d", d3.linkRadial().angle(d => d.x).radius(d => d.y));
+    .attr("d", d3.linkRadial()
+      .angle(d => d.x)
+      .radius(d => d.radius));
 
-  // Узлы
+  // 5) Узлы
   const node = g.selectAll(".node")
     .data(root.descendants())
     .enter()
     .append("g")
     .attr("class", d => "node" + (d.depth === 0 ? " node--root" : ""))
-    .attr("transform", d => `translate(${radialPoint(d.x, d.y)})`);
+    .attr("transform", d => {
+      const [x, y] = toXY(d.x, d.radius);
+      return `translate(${x},${y})`;
+    });
 
   node.append("circle")
-    .attr("r", d => d.depth === 0 ? 12 : 5)
+    .attr("r", d => d.depth === 0 ? 13 : 5)
     .on("click", async (event, d) => {
       event.stopPropagation();
       if (!d.data.children) {
         await expandNodeLayer(d.data);
-        drawRadialTree();
+        drawRadialTree({ fit: true });
       }
     });
 
-  // Подписи с обрезкой, tooltip и stroke-halo для читаемости
+  // 6) Подписи — с флипом, чтобы на левой половине не были «вверх ногами»
   node.append("text")
-    .attr("dy", "0.31em")
-    .attr("x", d => d.x < Math.PI ? 12 : -12)
+    .attr("dy", "0.32em")
+    .attr("x", d => d.x < Math.PI ? 11 : -11)
     .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
-    .attr("transform", d => d.depth === 0 ? "" : `rotate(${d.x * 180 / Math.PI - 90})`)
-    .text(d => truncate(d.data.name, 22))
+    .attr("transform", d => {
+      if (d.depth === 0) return "";
+      const deg = d.x * 180 / Math.PI - 90;
+      // Левую половину разворачиваем на 180°, чтобы текст читался слева направо
+      return d.x > Math.PI ? `rotate(${deg + 180})` : `rotate(${deg})`;
+    })
+    .text(d => truncate(d.data.name, MAX_LABEL_LEN))
     .append("title")
     .text(d => d.data.name);
+
+  // 7) Auto-fit: плавно подгоняем масштаб, чтобы дерево целиком влезло
+  if (fit) {
+    const maxR = d3.max(root.descendants(), d => d.radius) || LEVEL_STEP;
+    const needed = maxR + LABEL_PADDING;
+    const avail = Math.min(width, height) / 2 - 30;
+    const scale = Math.max(0.08, Math.min(1.6, avail / needed));
+
+    svg.interrupt();
+    svg.transition().duration(400).call(
+      zoomBehavior.transform,
+      d3.zoomIdentity.translate(width / 2, height / 2).scale(scale)
+    );
+  }
 }
 
 /* ============================================================
- *  Экспорт в CSV
+ *  Экспорт CSV
  * ============================================================ */
 function exportToCSV() {
   if (!treeData) return;
   const rows = [["keyword", "probability_pct", "depth", "path"]];
-
   function walk(node, depth) {
     if (depth > 0) {
       const m = /\((\d+)%\)$/.exec(node.name || "");
